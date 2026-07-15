@@ -4,12 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "==> GapScribe installer (Apple Silicon)"
-
+# Homebrew/bash under Rosetta report x86_64 even on M-series Macs.
 if [[ "$(uname -m)" != "arm64" ]]; then
+  exec arch -arm64 /bin/bash "$0" "$@"
+fi
+
+if [[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]]; then
   echo "Error: GapScribe is built for Apple Silicon (M-series) Macs only." >&2
   exit 1
 fi
+
+echo "==> GapScribe installer (Apple Silicon)"
 
 if ! command -v brew &>/dev/null; then
   echo "Error: Homebrew is required. Install from https://brew.sh" >&2
@@ -48,13 +53,28 @@ fi
 
 echo "==> Using Python: $PYTHON"
 
+venv_has_x86_only_packages() {
+  local site_packages so info
+  site_packages=$(find .venv/lib -maxdepth 2 -type d -name 'site-packages' 2>/dev/null | head -1)
+  [[ -n "$site_packages" ]] || return 1
+
+  while IFS= read -r -d '' so; do
+    info=$(file "$so")
+    if echo "$info" | grep -q 'x86_64' && ! echo "$info" | grep -q 'arm64'; then
+      return 0
+    fi
+  done < <(find "$site_packages" -name '*.so' -print0 2>/dev/null)
+
+  return 1
+}
+
 echo "==> Creating virtual environment (.venv)..."
 if [[ -d .venv ]]; then
   venv_python=".venv/bin/python"
-  if [[ -x "$venv_python" ]] && file "$venv_python" | grep -q "arm64"; then
+  if [[ -x "$venv_python" ]] && file "$venv_python" | grep -q "arm64" && ! venv_has_x86_only_packages; then
     echo "    .venv already exists, reusing it."
   else
-    echo "    Removing non-arm64 .venv and recreating..."
+    echo "    Removing incompatible .venv and recreating..."
     rm -rf .venv
     "$PYTHON" -m venv .venv
   fi
@@ -72,19 +92,7 @@ echo "==> Installing Python packages..."
 pip install faster-whisper sounddevice scipy typer numpy
 
 echo "==> Pre-downloading Whisper large-v3-turbo model to ./models..."
-mkdir -p models
-python - <<'PY'
-from faster_whisper import WhisperModel
-
-model = WhisperModel(
-    "large-v3-turbo",
-    device="cpu",
-    compute_type="int8_float16",
-    download_root="./models",
-    cpu_threads=0,
-)
-print("Model downloaded successfully.")
-PY
+python download_model.py
 
 echo ""
 echo "GapScribe installed successfully."

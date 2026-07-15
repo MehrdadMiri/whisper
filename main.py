@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import signal
 import subprocess
 import sys
@@ -38,7 +37,16 @@ RECORDER_SCRIPT = Path(__file__).resolve().parent / "recorder.py"
 
 
 def _require_apple_silicon() -> None:
-    if platform.machine() != "arm64":
+    try:
+        arm64 = subprocess.run(
+            ["sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        arm64 = ""
+    if arm64 != "1":
         typer.echo("GapScribe requires an Apple Silicon (M-series) Mac.", err=True)
         raise typer.Exit(code=1)
 
