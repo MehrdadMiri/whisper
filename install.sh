@@ -89,9 +89,9 @@ echo "==> Upgrading pip..."
 pip install --upgrade pip
 
 echo "==> Installing Python packages..."
-pip install faster-whisper sounddevice scipy typer numpy
+pip install faster-whisper sounddevice scipy typer numpy rich
 
-echo "==> Pre-downloading Whisper large-v3-turbo model to ./models..."
+echo "==> Pre-downloading Whisper large-v3 from ModelScope to ./models..."
 python download_model.py
 
 echo ""

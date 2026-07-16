@@ -21,8 +21,8 @@ from media import (
     wav_duration_seconds,
 )
 
-MODEL_NAME = "large-v3"  # turbo cannot translate; use full multilingual model
-MODELS_DIR = Path(__file__).resolve().parent / "models"
+# Local CTranslate2 weights (downloaded from ModelScope by download_model.py).
+MODEL_DIR = Path(__file__).resolve().parent / "models" / "faster-whisper-large-v3"
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 DEFAULT_AUDIO = Path("/tmp/recording.wav")
 
@@ -75,20 +75,27 @@ def _resolve_workers(workers: int | None, job_count: int) -> int:
 
 
 def _load_model(
-    models_dir: Path = MODELS_DIR,
+    models_dir: Path = MODEL_DIR,
     *,
     num_workers: int = 1,
 ) -> WhisperModel:
+    model_path = models_dir
+    if not (model_path / "model.bin").is_file():
+        raise FileNotFoundError(
+            f"Whisper model not found at {model_path}. "
+            "Run: python download_model.py"
+        )
+
     cpu_count = os.cpu_count() or 4
     cpu_threads = max(1, cpu_count // max(1, num_workers))
     errors: list[str] = []
     for compute_type in COMPUTE_TYPE_FALLBACKS:
         try:
             return WhisperModel(
-                MODEL_NAME,
+                str(model_path),
                 device=DEVICE,
                 compute_type=compute_type,
-                download_root=str(models_dir),
+                local_files_only=True,
                 cpu_threads=cpu_threads,
                 num_workers=num_workers,
             )
@@ -157,7 +164,7 @@ def transcribe(
     audio_path: Path,
     output_path: Path,
     language: str | None = None,
-    models_dir: Path = MODELS_DIR,
+    models_dir: Path = MODEL_DIR,
     workers: int | None = None,
 ) -> Path:
     """Translate audio minute-by-minute (with 5s overlap) into a markdown file."""
@@ -248,7 +255,7 @@ def transcribe_media_file(
     source_path: Path,
     output_path: Path | None = None,
     language: str | None = None,
-    models_dir: Path = MODELS_DIR,
+    models_dir: Path = MODEL_DIR,
     workers: int | None = None,
 ) -> Path:
     if not is_media_file(source_path):

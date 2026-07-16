@@ -17,6 +17,9 @@ env/
 # Whisper models (downloaded by install.sh)
 models/
 
+# Local meeting recordings
+meetings/
+
 # Environment variables
 .env
 .env.*

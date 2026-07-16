@@ -295,7 +295,7 @@ def stop(
         typer.echo("Recording file not found at /tmp/recording.wav.", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo("Translating with Whisper large-v3-turbo (minute-by-minute)...")
+    typer.echo("Translating with Whisper large-v3 (minute-by-minute)...")
     transcript_path = resolve_conversation_path()
     try:
         output = transcribe(
@@ -337,7 +337,7 @@ def convert(
 ) -> None:
     """Translate an existing audio or video file to English markdown (minute-by-minute)."""
     typer.echo(f"Preparing media: {file}")
-    typer.echo("Translating with Whisper large-v3-turbo (minute-by-minute)...")
+    typer.echo("Translating with Whisper large-v3 (minute-by-minute)...")
     try:
         result = transcribe_media_file(
             source_path=file,
