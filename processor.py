@@ -8,14 +8,19 @@ from pathlib import Path
 from faster_whisper import WhisperModel
 
 from control import conversation_path, new_conversation_id
-from media import is_media_file, prepare_media_for_transcription
+from media import (
+    is_media_file,
+    prepare_media_for_transcription,
+    probe_duration_seconds,
+    wav_duration_seconds,
+)
 
 MODEL_NAME = "large-v3-turbo"
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 DEFAULT_AUDIO = Path("/tmp/recording.wav")
 
 DEVICE = "cpu"
-COMPUTE_TYPE = "int8_float16"
+COMPUTE_TYPE_FALLBACKS = ("int8_float16", "int8", "float32")
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -25,12 +30,21 @@ def _format_timestamp(seconds: float) -> str:
 
 
 def _load_model(models_dir: Path = MODELS_DIR) -> WhisperModel:
-    return WhisperModel(
-        MODEL_NAME,
-        device=DEVICE,
-        compute_type=COMPUTE_TYPE,
-        download_root=str(models_dir),
-        cpu_threads=0,
+    errors: list[str] = []
+    for compute_type in COMPUTE_TYPE_FALLBACKS:
+        try:
+            return WhisperModel(
+                MODEL_NAME,
+                device=DEVICE,
+                compute_type=compute_type,
+                download_root=str(models_dir),
+                cpu_threads=0,
+            )
+        except ValueError as exc:
+            errors.append(f"{compute_type}: {exc}")
+    raise RuntimeError(
+        "Unable to load Whisper model with supported compute types: "
+        + "; ".join(errors)
     )
 
 
@@ -79,6 +93,21 @@ def transcribe_media_file(
     work_wav = Path(f"/tmp/gapscribe_convert_{uuid.uuid4().hex}.wav")
     try:
         prepare_media_for_transcription(source_path, work_wav)
+        source_duration = probe_duration_seconds(source_path)
+        audio_duration = wav_duration_seconds(work_wav)
+        if (
+            source_duration is not None
+            and source_duration > 0
+            and audio_duration > 0
+            and audio_duration < source_duration * 0.85
+        ):
+            print(
+                "Warning: source media reports "
+                f"{source_duration / 60:.1f} min but only "
+                f"{audio_duration / 60:.1f} min of audio could be decoded "
+                "(corrupt or truncated audio stream).",
+                flush=True,
+            )
         return transcribe(
             audio_path=work_wav,
             output_path=output_path,

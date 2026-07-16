@@ -10,6 +10,22 @@ import sys
 import time
 from pathlib import Path
 
+
+def _reexec_with_project_venv() -> None:
+    """Use .venv when present so `python main.py` works outside an activated env."""
+    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+    if not venv_python.is_file():
+        return
+    try:
+        if Path(sys.executable).resolve() == venv_python.resolve():
+            return
+    except OSError:
+        return
+    os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+
+_reexec_with_project_venv()
+
 import typer
 
 from control import (
