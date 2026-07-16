@@ -1,14 +1,19 @@
-"""Transcription using faster-whisper (Apple Silicon optimized)."""
+"""Translation using faster-whisper (Apple Silicon optimized)."""
 
 from __future__ import annotations
 
+import math
+import os
+import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from faster_whisper import WhisperModel
 
 from control import conversation_path, new_conversation_id
 from media import (
+    extract_wav_segment,
     is_media_file,
     prepare_media_for_transcription,
     probe_duration_seconds,
@@ -22,6 +27,10 @@ DEFAULT_AUDIO = Path("/tmp/recording.wav")
 DEVICE = "cpu"
 COMPUTE_TYPE_FALLBACKS = ("int8_float16", "int8", "float32")
 
+MINUTE_SECONDS = 60.0
+OVERLAP_SECONDS = 5.0
+DEFAULT_WORKERS = min(4, max(1, (os.cpu_count() or 2) // 2))
+
 
 def _format_timestamp(seconds: float) -> str:
     total = max(0, int(seconds))
@@ -29,7 +38,19 @@ def _format_timestamp(seconds: float) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
-def _load_model(models_dir: Path = MODELS_DIR) -> WhisperModel:
+def _resolve_workers(workers: int | None, job_count: int) -> int:
+    if workers is None:
+        workers = DEFAULT_WORKERS
+    return max(1, min(int(workers), max(1, job_count)))
+
+
+def _load_model(
+    models_dir: Path = MODELS_DIR,
+    *,
+    num_workers: int = 1,
+) -> WhisperModel:
+    cpu_count = os.cpu_count() or 4
+    cpu_threads = max(1, cpu_count // max(1, num_workers))
     errors: list[str] = []
     for compute_type in COMPUTE_TYPE_FALLBACKS:
         try:
@@ -38,7 +59,8 @@ def _load_model(models_dir: Path = MODELS_DIR) -> WhisperModel:
                 device=DEVICE,
                 compute_type=compute_type,
                 download_root=str(models_dir),
-                cpu_threads=0,
+                cpu_threads=cpu_threads,
+                num_workers=num_workers,
             )
         except ValueError as exc:
             errors.append(f"{compute_type}: {exc}")
@@ -48,33 +70,141 @@ def _load_model(models_dir: Path = MODELS_DIR) -> WhisperModel:
     )
 
 
-def transcribe(
-    audio_path: Path,
-    output_path: Path,
-    language: str | None = None,
-    models_dir: Path = MODELS_DIR,
-) -> Path:
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+def _minute_windows(duration: float) -> list[tuple[int, float, float, float, float]]:
+    """Return (minute_index, core_start, core_end, chunk_start, chunk_end)."""
+    if duration <= 0:
+        return []
 
-    model = _load_model(models_dir=models_dir)
+    total_minutes = max(1, math.ceil(duration / MINUTE_SECONDS))
+    windows: list[tuple[int, float, float, float, float]] = []
+    for minute_index in range(total_minutes):
+        core_start = minute_index * MINUTE_SECONDS
+        core_end = min(duration, (minute_index + 1) * MINUTE_SECONDS)
+        if core_end <= core_start:
+            continue
+        chunk_start = max(0.0, core_start - OVERLAP_SECONDS)
+        chunk_end = min(duration, core_end + OVERLAP_SECONDS)
+        windows.append((minute_index, core_start, core_end, chunk_start, chunk_end))
+    return windows
+
+
+def _translate_chunk(
+    model: WhisperModel,
+    chunk_path: Path,
+    *,
+    language: str | None,
+    chunk_start: float,
+    core_start: float,
+    core_end: float,
+) -> list[str]:
     segments, _info = model.transcribe(
-        str(audio_path),
-        task="transcribe",
+        str(chunk_path),
+        task="translate",
         language=language,
         vad_filter=True,
     )
 
     lines: list[str] = []
     for segment in segments:
-        start = _format_timestamp(segment.start)
-        end = _format_timestamp(segment.end)
+        abs_start = chunk_start + float(segment.start)
+        abs_end = chunk_start + float(segment.end)
+        midpoint = (abs_start + abs_end) / 2.0
+        # Keep only speech whose midpoint falls in this minute's core window.
+        if midpoint < core_start or midpoint >= core_end:
+            continue
         text = segment.text.strip()
-        if text:
-            lines.append(f"[{start} - {end}] {text}")
+        if not text:
+            continue
+        lines.append(
+            f"[{_format_timestamp(abs_start)} - {_format_timestamp(abs_end)}] {text}"
+        )
+    return lines
+
+
+def transcribe(
+    audio_path: Path,
+    output_path: Path,
+    language: str | None = None,
+    models_dir: Path = MODELS_DIR,
+    workers: int | None = None,
+) -> Path:
+    """Translate audio minute-by-minute (with 5s overlap) into a markdown file."""
+    if not audio_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    duration = wav_duration_seconds(audio_path)
+    if duration <= 0:
+        raise RuntimeError(f"Audio file has no usable duration: {audio_path}")
+
+    windows = _minute_windows(duration)
+    worker_count = _resolve_workers(workers, len(windows))
+    model = _load_model(models_dir=models_dir, num_workers=worker_count)
+    total_minutes = windows[-1][0] + 1 if windows else 0
+
+    sections: list[str] = [
+        "# Translation",
+        "",
+        f"Source: `{audio_path.name}`",
+        f"Duration: {_format_timestamp(duration)}",
+        f"Workers: {worker_count}",
+        "",
+    ]
+
+    work_dir = Path(f"/tmp/gapscribe_chunks_{uuid.uuid4().hex}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        chunk_paths: dict[int, Path] = {}
+        for minute_index, _core_start, _core_end, chunk_start, chunk_end in windows:
+            chunk_path = work_dir / f"minute_{minute_index:04d}.wav"
+            extract_wav_segment(audio_path, chunk_path, chunk_start, chunk_end)
+            chunk_paths[minute_index] = chunk_path
+
+        print(
+            f"Translating {total_minutes} minute(s) with {worker_count} worker(s)...",
+            flush=True,
+        )
+
+        results: dict[int, list[str]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = {
+                pool.submit(
+                    _translate_chunk,
+                    model,
+                    chunk_paths[minute_index],
+                    language=language,
+                    chunk_start=chunk_start,
+                    core_start=core_start,
+                    core_end=core_end,
+                ): (minute_index, core_start, core_end)
+                for minute_index, core_start, core_end, chunk_start, _chunk_end in windows
+            }
+            for future in as_completed(futures):
+                minute_index, core_start, core_end = futures[future]
+                results[minute_index] = future.result()
+                print(
+                    f"Finished minute {minute_index + 1}/{total_minutes} "
+                    f"({_format_timestamp(core_start)} - {_format_timestamp(core_end)})",
+                    flush=True,
+                )
+
+        for minute_index, core_start, core_end, _chunk_start, _chunk_end in windows:
+            minute_label = minute_index + 1
+            lines = results[minute_index]
+            sections.append(
+                f"## Minute {minute_label} "
+                f"({_format_timestamp(core_start)} - {_format_timestamp(core_end)})"
+            )
+            sections.append("")
+            if lines:
+                sections.extend(lines)
+            else:
+                sections.append("_(no speech detected)_")
+            sections.append("")
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    output_path.write_text("\n".join(sections).rstrip() + "\n", encoding="utf-8")
     return output_path
 
 
@@ -83,6 +213,7 @@ def transcribe_media_file(
     output_path: Path | None = None,
     language: str | None = None,
     models_dir: Path = MODELS_DIR,
+    workers: int | None = None,
 ) -> Path:
     if not is_media_file(source_path):
         raise ValueError(f"Unsupported media file: {source_path}")
@@ -113,6 +244,7 @@ def transcribe_media_file(
             output_path=output_path,
             language=language,
             models_dir=models_dir,
+            workers=workers,
         )
     finally:
         work_wav.unlink(missing_ok=True)

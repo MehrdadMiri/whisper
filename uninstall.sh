@@ -23,8 +23,9 @@ fi
 echo "Removing temporary audio and transcript files from /tmp/..."
 rm -f /tmp/recording.wav /tmp/gapscribe.pid /tmp/gapscribe.lock
 rm -f /tmp/gapscribe.control.json /tmp/gapscribe.state.json /tmp/gapscribe.session.json
-rm -f /tmp/conversation_*.txt
+rm -f /tmp/conversation_*.txt /tmp/conversation_*.md
 rm -f /tmp/gapscribe_mics.wav /tmp/gapscribe_screen.wav /tmp/gapscribe_screen.mp4
 rm -f /tmp/gapscribe_mic_*.wav /tmp/gapscribe_convert_*.wav
+rm -rf /tmp/gapscribe_chunks_*
 
 echo "GapScribe uninstalled."

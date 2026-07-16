@@ -42,7 +42,7 @@ from recorder import RECORDING_PATH, run_recording_session
 
 app = typer.Typer(
     name="gapscribe",
-    help="Record audio/screen and transcribe in English/Persian with Whisper.",
+    help="Record audio/screen and translate mixed speech to English with Whisper.",
     add_completion=False,
 )
 
@@ -261,10 +261,16 @@ def stop(
         None,
         "--language",
         "-l",
-        help="Optional ISO language code (e.g. en, fa). Omit for auto-detection.",
+        help="Optional source ISO language code (e.g. fa). Omit for auto-detection.",
+    ),
+    workers: int = typer.Option(
+        0,
+        "--workers",
+        "-w",
+        help="Parallel minute workers (default: auto, max 4).",
     ),
 ) -> None:
-    """Stop recording, transcribe, and write /tmp/conversation_<id>.txt."""
+    """Stop recording, translate minute-by-minute, and write /tmp/conversation_<id>.md."""
     pid = _read_pid()
     if pid is None or not _is_process_running(pid):
         _clear_pid()
@@ -289,21 +295,22 @@ def stop(
         typer.echo("Recording file not found at /tmp/recording.wav.", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo("Transcribing with Whisper large-v3-turbo (this may take a while)...")
+    typer.echo("Translating with Whisper large-v3-turbo (minute-by-minute)...")
     transcript_path = resolve_conversation_path()
     try:
         output = transcribe(
             audio_path=RECORDING_PATH,
             output_path=transcript_path,
             language=language,
+            workers=workers or None,
         )
     except Exception as exc:
-        typer.echo(f"Transcription failed: {exc}", err=True)
+        typer.echo(f"Translation failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     cleanup_recording(RECORDING_PATH)
     clear_session_files()
-    typer.echo(f"Transcript saved to {output}")
+    typer.echo(f"Translation saved to {output}")
 
 
 @app.command()
@@ -313,29 +320,36 @@ def convert(
         None,
         "--output",
         "-o",
-        help="Output transcript path. Defaults to /tmp/conversation_<id>.txt",
+        help="Output markdown path. Defaults to /tmp/conversation_<id>.md",
     ),
     language: str | None = typer.Option(
         None,
         "--language",
         "-l",
-        help="Optional ISO language code (e.g. en, fa). Omit for auto-detection.",
+        help="Optional source ISO language code (e.g. fa). Omit for auto-detection.",
+    ),
+    workers: int = typer.Option(
+        0,
+        "--workers",
+        "-w",
+        help="Parallel minute workers (default: auto, max 4).",
     ),
 ) -> None:
-    """Transcribe an existing audio or video file (e.g. a past meeting recording)."""
+    """Translate an existing audio or video file to English markdown (minute-by-minute)."""
     typer.echo(f"Preparing media: {file}")
-    typer.echo("Transcribing with Whisper large-v3-turbo...")
+    typer.echo("Translating with Whisper large-v3-turbo (minute-by-minute)...")
     try:
         result = transcribe_media_file(
             source_path=file,
             output_path=output,
             language=language,
+            workers=workers or None,
         )
     except Exception as exc:
         typer.echo(f"Conversion failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    typer.echo(f"Transcript saved to {result}")
+    typer.echo(f"Translation saved to {result}")
 
 
 if __name__ == "__main__":

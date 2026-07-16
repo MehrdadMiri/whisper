@@ -180,3 +180,44 @@ def prepare_media_for_transcription(source: Path, work_wav: Path) -> Path:
 
     extract_audio_to_wav(source, work_wav)
     return work_wav
+
+
+def extract_wav_segment(
+    source: Path,
+    dest: Path,
+    start_seconds: float,
+    end_seconds: float,
+    sample_rate: int = SAMPLE_RATE,
+) -> Path:
+    """Cut a WAV slice [start_seconds, end_seconds) into dest."""
+    if end_seconds <= start_seconds:
+        raise ValueError("end_seconds must be greater than start_seconds")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.unlink(missing_ok=True)
+    duration = end_seconds - start_seconds
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-i",
+        str(source),
+        "-t",
+        f"{duration:.3f}",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-c:a",
+        "pcm_s16le",
+        str(dest),
+    ]
+    result = _run_ffmpeg(cmd)
+    if result.returncode != 0 or wav_duration_seconds(dest) < _MIN_USABLE_AUDIO_SECONDS:
+        detail = (result.stderr or result.stdout or "segment cut failed").strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else "Failed to extract WAV segment")
+    return dest

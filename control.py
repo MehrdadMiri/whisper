@@ -18,7 +18,7 @@ def new_conversation_id() -> str:
 
 
 def conversation_path(conversation_id: str) -> Path:
-    return Path(f"/tmp/conversation_{conversation_id}.txt")
+    return Path(f"/tmp/conversation_{conversation_id}.md")
 
 
 def save_conversation_id(conversation_id: str) -> None:
