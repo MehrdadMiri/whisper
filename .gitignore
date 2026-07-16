@@ -21,6 +21,9 @@ models/
 .env
 .env.*
 
+# Local Whisper prompt config (copy from config_example.json)
+config.json
+
 # macOS
 .DS_Store
 

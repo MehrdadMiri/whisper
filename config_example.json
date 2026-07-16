@@ -1,0 +1,13 @@
+{
+  "prompt_snapp": [
+    "ExampleTerm",
+    "AnotherTerm"
+  ],
+  "prompt_team": [
+    "ProjectTerm"
+  ],
+  "prompt_team_members": [
+    "Alice",
+    "Bob"
+  ]
+}

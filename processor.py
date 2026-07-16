@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
@@ -20,8 +21,9 @@ from media import (
     wav_duration_seconds,
 )
 
-MODEL_NAME = "large-v3-turbo"
+MODEL_NAME = "large-v3"  # turbo cannot translate; use full multilingual model
 MODELS_DIR = Path(__file__).resolve().parent / "models"
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 DEFAULT_AUDIO = Path("/tmp/recording.wav")
 
 DEVICE = "cpu"
@@ -30,6 +32,34 @@ COMPUTE_TYPE_FALLBACKS = ("int8_float16", "int8", "float32")
 MINUTE_SECONDS = 60.0
 OVERLAP_SECONDS = 5.0
 DEFAULT_WORKERS = min(4, max(1, (os.cpu_count() or 2) // 2))
+
+
+def _prompt_terms(data: dict, key: str) -> list[str]:
+    value = data.get(key, [])
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def load_whisper_prompt(config_path: Path = CONFIG_PATH) -> str | None:
+    """Build Whisper initial_prompt from config.json if present (optional)."""
+    if not config_path.exists():
+        return None
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    terms = (
+        _prompt_terms(data, "prompt_snapp")
+        + _prompt_terms(data, "prompt_team")
+        + _prompt_terms(data, "prompt_team_members")
+    )
+    if not terms:
+        return None
+    return " ".join(f"'{term}'" for term in terms)
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -93,6 +123,7 @@ def _translate_chunk(
     chunk_path: Path,
     *,
     language: str | None,
+    initial_prompt: str | None,
     chunk_start: float,
     core_start: float,
     core_end: float,
@@ -101,6 +132,7 @@ def _translate_chunk(
         str(chunk_path),
         task="translate",
         language=language,
+        initial_prompt=initial_prompt,
         vad_filter=True,
     )
 
@@ -139,6 +171,7 @@ def transcribe(
     windows = _minute_windows(duration)
     worker_count = _resolve_workers(workers, len(windows))
     model = _load_model(models_dir=models_dir, num_workers=worker_count)
+    initial_prompt = load_whisper_prompt()
     total_minutes = windows[-1][0] + 1 if windows else 0
 
     sections: list[str] = [
@@ -163,6 +196,8 @@ def transcribe(
             f"Translating {total_minutes} minute(s) with {worker_count} worker(s)...",
             flush=True,
         )
+        if initial_prompt:
+            print(f"Using Whisper prompt from {CONFIG_PATH.name}", flush=True)
 
         results: dict[int, list[str]] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
@@ -172,6 +207,7 @@ def transcribe(
                     model,
                     chunk_paths[minute_index],
                     language=language,
+                    initial_prompt=initial_prompt,
                     chunk_start=chunk_start,
                     core_start=core_start,
                     core_end=core_end,
