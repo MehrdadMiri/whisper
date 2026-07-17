@@ -36,7 +36,7 @@ from control import (
     resolve_conversation_path,
     start_conversation_session,
 )
-from devices import get_default_mic_id, list_microphones
+from devices import find_system_audio_device, get_default_mic_id, list_microphones
 from processor import cleanup_recording, transcribe, transcribe_media_file
 from recorder import RECORDING_PATH, run_recording_session
 
@@ -222,6 +222,14 @@ def start(
     conversation_id = start_conversation_session()
     _init_session(mic_ids, screen)
 
+    if screen and find_system_audio_device() is None:
+        typer.echo(
+            "Warning: no system-audio loopback device found "
+            "(BlackHole / Loopback / Soundflower). "
+            "Screen capture will not include meeting/system sound.",
+            err=True,
+        )
+
     if foreground:
         _write_pid(os.getpid())
         LOCK_FILE.write_text("recording")
@@ -237,12 +245,15 @@ def start(
             _clear_pid()
         return
 
+    log_path = Path("/tmp/gapscribe.recorder.log")
+    log_file = log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         _recorder_command(mic_ids, screen, interactive=False),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    log_file.close()
     _write_pid(proc.pid)
     LOCK_FILE.write_text("recording")
     typer.echo(f"Recording started (PID {proc.pid}).")
@@ -292,8 +303,20 @@ def stop(
         time.sleep(0.2)
 
     if not RECORDING_PATH.exists():
-        typer.echo("Recording file not found at /tmp/recording.wav.", err=True)
-        raise typer.Exit(code=1)
+        mic_fallback = Path("/tmp/gapscribe_mics.wav")
+        if mic_fallback.exists() and mic_fallback.stat().st_size > 44:
+            typer.echo(
+                "Final mix missing; recovering microphone audio from "
+                f"{mic_fallback}.",
+                err=True,
+            )
+            RECORDING_PATH.write_bytes(mic_fallback.read_bytes())
+        else:
+            log_path = Path("/tmp/gapscribe.recorder.log")
+            typer.echo("Recording file not found at /tmp/recording.wav.", err=True)
+            if log_path.exists():
+                typer.echo(f"Recorder log: {log_path}", err=True)
+            raise typer.Exit(code=1)
 
     typer.echo("Translating with Whisper large-v3 (minute-by-minute)...")
     transcript_path = resolve_conversation_path()

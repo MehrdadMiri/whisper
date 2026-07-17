@@ -69,8 +69,12 @@ class MicTrack:
 class ScreenCapture:
     def __init__(self, output_path: Path = SCREEN_VIDEO_PATH) -> None:
         self.output_path = output_path
-        self.process: subprocess.Popen[str] | None = None
-        self.input_spec: str | None = find_screen_capture_input()
+        self.process: subprocess.Popen[bytes] | None = None
+        self.input_spec: str | None = None
+        self.has_system_audio = False
+        discovered = find_screen_capture_input()
+        if discovered is not None:
+            self.input_spec, self.has_system_audio = discovered
 
     @property
     def available(self) -> bool:
@@ -105,15 +109,29 @@ class ScreenCapture:
             "ultrafast",
             "-pix_fmt",
             "yuv420p",
+            # Fragmented MP4 stays readable if ffmpeg is interrupted mid-write.
+            "-movflags",
+            "+frag_keyframe+empty_moov+default_base_moof",
             str(self.output_path),
         ]
-        self.process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def stop(self) -> Path | None:
         if self.process is None:
             return None
         if self.process.poll() is None:
-            self.process.send_signal(signal.SIGINT)
+            try:
+                if self.process.stdin is not None:
+                    self.process.stdin.write(b"q")
+                    self.process.stdin.flush()
+                    self.process.stdin.close()
+            except (BrokenPipeError, OSError):
+                self.process.send_signal(signal.SIGINT)
             try:
                 self.process.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -227,15 +245,22 @@ class SessionRecorder:
         if MIC_WAV_PATH.exists() and MIC_WAV_PATH.stat().st_size > 44:
             final_sources.append(MIC_WAV_PATH)
 
-        if screen_path is not None:
+        # Screen video only helps transcription when a loopback audio device was used.
+        if screen_path is not None and self.screen.has_system_audio:
             from media import extract_audio_to_wav
 
             try:
                 extract_audio_to_wav(screen_path, SCREEN_AUDIO_PATH)
                 if SCREEN_AUDIO_PATH.stat().st_size > 44:
                     final_sources.append(SCREEN_AUDIO_PATH)
-            except subprocess.CalledProcessError:
-                print("Could not extract audio from screen capture.", file=sys.stderr)
+            except Exception as exc:
+                print(f"Could not extract audio from screen capture: {exc}", file=sys.stderr)
+        elif screen_path is not None and not self.screen.has_system_audio:
+            print(
+                "Screen was captured without system audio "
+                "(no BlackHole/Loopback/Soundflower device).",
+                file=sys.stderr,
+            )
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         if not final_sources:

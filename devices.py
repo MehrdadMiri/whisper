@@ -57,36 +57,55 @@ def _ffmpeg_device_listing() -> str:
     return result.stderr
 
 
-def find_screen_capture_input() -> str | None:
-    """Return an avfoundation input string for screen (+ system audio when available)."""
+def find_system_audio_device() -> str | None:
+    """Return an avfoundation system-audio device name when a loopback device exists."""
     listing = _ffmpeg_device_listing()
-    screen_name = None
-    audio_name = None
-
-    in_video = False
     in_audio = False
     for line in listing.splitlines():
         if "AVFoundation video devices" in line:
-            in_video, in_audio = True, False
+            in_audio = False
             continue
         if "AVFoundation audio devices" in line:
-            in_video, in_audio = False, True
+            in_audio = True
             continue
-
-        match = re.search(r"\[(\d+)\]\s+(.+)", line)
+        if not in_audio:
+            continue
+        match = re.search(r"\[\d+\]\s+(.+)", line)
         if not match:
             continue
+        name = match.group(1).strip()
+        lowered = name.lower()
+        if any(token in lowered for token in ("blackhole", "loopback", "soundflower")):
+            return name
+    return None
 
-        index, name = match.group(1), match.group(2).strip()
-        if in_video and "capture screen" in name.lower():
+
+def find_screen_capture_input() -> tuple[str, bool] | None:
+    """Return (avfoundation input, has_system_audio) for screen capture."""
+    listing = _ffmpeg_device_listing()
+    screen_name = None
+    audio_name = find_system_audio_device()
+
+    in_video = False
+    for line in listing.splitlines():
+        if "AVFoundation video devices" in line:
+            in_video = True
+            continue
+        if "AVFoundation audio devices" in line:
+            in_video = False
+            continue
+        if not in_video:
+            continue
+        match = re.search(r"\[\d+\]\s+(.+)", line)
+        if not match:
+            continue
+        name = match.group(1).strip()
+        if "capture screen" in name.lower():
             screen_name = name
-        if in_audio and audio_name is None:
-            lowered = name.lower()
-            if any(token in lowered for token in ("blackhole", "loopback", "soundflower")):
-                audio_name = name
+            break
 
     if screen_name is None:
         return None
     if audio_name:
-        return f"{screen_name}:{audio_name}"
-    return f"{screen_name}:none"
+        return f"{screen_name}:{audio_name}", True
+    return f"{screen_name}:none", False
