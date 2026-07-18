@@ -9,6 +9,7 @@ import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from queue import Queue
 
 from faster_whisper import WhisperModel
 
@@ -31,7 +32,7 @@ COMPUTE_TYPE_FALLBACKS = ("int8_float16", "int8", "float32")
 
 MINUTE_SECONDS = 60.0
 OVERLAP_SECONDS = 5.0
-DEFAULT_WORKERS = min(4, max(1, (os.cpu_count() or 2) // 2))
+BYTES_PER_MODEL = 8 * 1024**3
 
 
 def _prompt_terms(data: dict, key: str) -> list[str]:
@@ -68,16 +69,33 @@ def _format_timestamp(seconds: float) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
+def _total_memory_bytes() -> int:
+    """Return installed physical memory in bytes (fallback: 8 GiB)."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if isinstance(pages, int) and isinstance(page_size, int) and pages > 0 and page_size > 0:
+            return pages * page_size
+    except (AttributeError, OSError, ValueError):
+        pass
+    return BYTES_PER_MODEL
+
+
+def _models_from_memory() -> int:
+    """One Whisper model per 8 GiB of machine memory (at least one)."""
+    return max(1, _total_memory_bytes() // BYTES_PER_MODEL)
+
+
 def _resolve_workers(workers: int | None, job_count: int) -> int:
     if workers is None:
-        workers = DEFAULT_WORKERS
+        workers = _models_from_memory()
     return max(1, min(int(workers), max(1, job_count)))
 
 
 def _load_model(
     models_dir: Path = MODEL_DIR,
     *,
-    num_workers: int = 1,
+    model_count: int = 1,
 ) -> WhisperModel:
     model_path = models_dir
     if not (model_path / "model.bin").is_file():
@@ -87,7 +105,7 @@ def _load_model(
         )
 
     cpu_count = os.cpu_count() or 4
-    cpu_threads = max(1, cpu_count // max(1, num_workers))
+    cpu_threads = max(1, cpu_count // max(1, model_count))
     errors: list[str] = []
     for compute_type in COMPUTE_TYPE_FALLBACKS:
         try:
@@ -97,7 +115,7 @@ def _load_model(
                 compute_type=compute_type,
                 local_files_only=True,
                 cpu_threads=cpu_threads,
-                num_workers=num_workers,
+                num_workers=1,
             )
         except ValueError as exc:
             errors.append(f"{compute_type}: {exc}")
@@ -105,6 +123,16 @@ def _load_model(
         "Unable to load Whisper model with supported compute types: "
         + "; ".join(errors)
     )
+
+
+def _load_models(
+    models_dir: Path = MODEL_DIR,
+    *,
+    model_count: int,
+) -> list[WhisperModel]:
+    count = max(1, model_count)
+    print(f"Loading {count} Whisper model(s)...", flush=True)
+    return [_load_model(models_dir, model_count=count) for _ in range(count)]
 
 
 def _minute_windows(duration: float) -> list[tuple[int, float, float, float, float]]:
@@ -160,6 +188,31 @@ def _translate_chunk(
     return lines
 
 
+def _translate_chunk_with_pool(
+    model_pool: Queue[WhisperModel],
+    chunk_path: Path,
+    *,
+    language: str | None,
+    initial_prompt: str | None,
+    chunk_start: float,
+    core_start: float,
+    core_end: float,
+) -> list[str]:
+    model = model_pool.get()
+    try:
+        return _translate_chunk(
+            model,
+            chunk_path,
+            language=language,
+            initial_prompt=initial_prompt,
+            chunk_start=chunk_start,
+            core_start=core_start,
+            core_end=core_end,
+        )
+    finally:
+        model_pool.put(model)
+
+
 def transcribe(
     audio_path: Path,
     output_path: Path,
@@ -177,7 +230,10 @@ def transcribe(
 
     windows = _minute_windows(duration)
     worker_count = _resolve_workers(workers, len(windows))
-    model = _load_model(models_dir=models_dir, num_workers=worker_count)
+    models = _load_models(models_dir=models_dir, model_count=worker_count)
+    model_pool: Queue[WhisperModel] = Queue()
+    for model in models:
+        model_pool.put(model)
     initial_prompt = load_whisper_prompt()
     total_minutes = windows[-1][0] + 1 if windows else 0
 
@@ -187,6 +243,7 @@ def transcribe(
         f"Source: `{audio_path.name}`",
         f"Duration: {_format_timestamp(duration)}",
         f"Workers: {worker_count}",
+        f"Models: {len(models)}",
         "",
     ]
 
@@ -200,7 +257,8 @@ def transcribe(
             chunk_paths[minute_index] = chunk_path
 
         print(
-            f"Translating {total_minutes} minute(s) with {worker_count} worker(s)...",
+            f"Translating {total_minutes} minute(s) with {worker_count} "
+            f"worker(s) / {len(models)} model(s)...",
             flush=True,
         )
         if initial_prompt:
@@ -210,8 +268,8 @@ def transcribe(
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             futures = {
                 pool.submit(
-                    _translate_chunk,
-                    model,
+                    _translate_chunk_with_pool,
+                    model_pool,
                     chunk_paths[minute_index],
                     language=language,
                     initial_prompt=initial_prompt,

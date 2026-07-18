@@ -278,7 +278,7 @@ def stop(
         0,
         "--workers",
         "-w",
-        help="Parallel minute workers (default: auto, max 4).",
+        help="Parallel minute workers / Whisper models (default: auto, 1 per 8 GiB RAM).",
     ),
 ) -> None:
     """Stop recording, translate minute-by-minute, and write /tmp/conversation_<id>.md."""
@@ -355,7 +355,7 @@ def convert(
         0,
         "--workers",
         "-w",
-        help="Parallel minute workers (default: auto, max 4).",
+        help="Parallel minute workers / Whisper models (default: auto, 1 per 8 GiB RAM).",
     ),
 ) -> None:
     """Translate an existing audio or video file to English markdown (minute-by-minute)."""
