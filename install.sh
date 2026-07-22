@@ -31,9 +31,20 @@ install_if_missing() {
   fi
 }
 
-echo "==> Checking system dependencies (ffmpeg, portaudio)..."
+install_cask_if_missing() {
+  local pkg="$1"
+  if brew list --cask "$pkg" &>/dev/null; then
+    echo "    $pkg already installed."
+  else
+    echo "    Installing $pkg..."
+    brew install --cask "$pkg"
+  fi
+}
+
+echo "==> Checking system dependencies (ffmpeg, portaudio, blackhole-2ch)..."
 install_if_missing ffmpeg
 install_if_missing portaudio
+install_cask_if_missing blackhole-2ch
 
 if [[ -x /opt/homebrew/bin/python3 ]]; then
   PYTHON="/opt/homebrew/bin/python3"
@@ -101,3 +112,8 @@ echo "Start recording:          python main.py start [--screen] [--mic ID]"
 echo "Toggle during recording:  python main.py toggle-mic <id> | toggle-screen"
 echo "Stop and translate:       python main.py stop"
 echo "Convert a file:           python main.py convert meeting.mp4"
+echo ""
+echo "System audio (--screen): BlackHole 2ch is installed for meeting/system sound."
+echo "  Reboot once if this was a fresh install, then in Audio MIDI Setup create a"
+echo "  Multi-Output Device with your speakers/headphones + BlackHole 2ch, and set"
+echo "  that as the Mac output so you can hear audio while capturing it."
